@@ -96,3 +96,23 @@ The application does not blindly trust AI outputs:
 2. If the AI assigns an Enterprise ticket to `P2` or `P3`, the system overrides or requires an adjustment to at least `P1`.
 3. AI summaries are treated as untrusted text and sanitized against XSS injection.
 4. Tickets triaged with `manual_review` or unknown decisions are isolated in the `/review` queue until verified by a human agent.
+
+---
+
+## 6. Fake API and In-Memory Data Store Implementation
+
+### 6.1 Singleton Persistence Across Next.js HMR
+In Next.js development mode, Route Handlers are frequently re-evaluated upon file changes. If an in-memory store is simply a module-level variable, every edit wipes the state and re-seeds the data, resetting simulated claims and agent actions. To prevent this, the store instance is bound to `globalThis.__ticketStore__`.
+
+### 6.2 Data Ingestion & Deduplication
+The store initializes with all 12 provided test tickets, followed by 5,000 deterministically generated tickets with varied customer plans, categories, and SLA timestamps. Test ticket `T-2001` (which appears twice in the brief's sample data) is deduplicated during insertion using an ID set, ensuring clean single-key indexing.
+
+### 6.3 Background Event Simulation
+A background timer runs every 6 seconds simulating a live, active support center:
+- 40% probability: New ticket arrives with realistic customer data.
+- 30% probability: A simulated peer agent (`agent-2` or `agent-3`) claims an open ticket.
+- 30% probability: An active ticket transitions to `resolved` or `closed`.
+Every mutation is written to an in-memory `updateLog` ring buffer (capped at 1,000 entries), allowing `/api/tickets/updates?since=<timestamp>` to return concise delta changes.
+
+### 6.4 Chaos Simulation and Deterministic Test Bypass
+The API simulates real-world network latency (300ms to 1500ms) and transient errors (10% 500 error rate, 25% 409 claim conflict rate). To ensure automated tests never fail spuriously due to random chaos, the simulation is automatically bypassed when `NODE_ENV === 'test'`, `DISABLE_CHAOS === 'true'`, or when the `x-bypass-chaos: 1` request header is present.
