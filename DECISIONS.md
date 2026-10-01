@@ -134,3 +134,27 @@ To achieve this, Redux provides both instantaneous optimistic mutation actions (
 
 ### 7.3 Store Provider Architecture in Next.js App Router
 Per Next.js App Router guidelines, creating a Redux store at module scope risks leaking state between different client sessions during server rendering. `StoreProvider.tsx` utilizes `useRef` to instantiate a single store instance per client render cycle, ensuring clean client-side isolation.
+
+---
+
+## 8. Ticket List, Continuous Scrolling & Mobile Responsiveness
+
+### 8.1 Continuous Scrolling vs. Monolithic Payloads
+The brief notes: "Agents dislike clicking 'next page'. Show all tickets on one page, so they can just scroll."
+Fetching 5,000+ tickets in a single network request creates a massive JSON payload (>2MB) and triggers severe DOM bloat that destroys mobile Lighthouse performance. To satisfy the UX desire without destroying performance, the API serves tickets in 50-item paginated chunks, and the frontend provides progressive continuous scrolling. When an agent reaches the bottom of the list, a "Scroll & Load more" progressive trigger loads the next page without requiring navigation away from the current view.
+
+### 8.2 Live SLA Countdown Architecture
+SLA thresholds are calculated strictly from `created_at`:
+- P0: 1 hour
+- P1: 4 hours
+- P2: 24 hours
+- P3: 72 hours
+Each `DeadlineBadge` component runs an internal 1-second interval (`setInterval`) recalculating remaining time. If remaining time is <= 0, the ticket is classified as `Late` with an overdue duration. If remaining time is under 20% of the total SLA duration, it is marked `At Risk`. If `created_at` is in the future (such as test ticket `T-2008`), the interval displays `Starts in Xd` rather than producing negative or NaN artifacts.
+
+### 8.3 Mobile Responsiveness on 375px Viewports
+Standard HTML tables collapse awkwardly or produce unreadable horizontal scrolling on 375px screens. The application implements an adaptive layout:
+- On desktop viewports (`sm:` and larger): Renders a dense, information-rich table (`TicketRow`) with explicit column widths, checkbox controls, and action triggers.
+- On mobile viewports (`< 640px` down to 375px): Automatically switches to card-based presentation (`MobileTicketCard`), displaying ID, plan, SLA deadline, status badges, and quick-claim actions in an ergonomic vertical card format.
+
+### 8.4 Row-Level Memoization
+To prevent every table row from redrawing whenever a single ticket is claimed or modified, `TicketRow` and `MobileTicketCard` are wrapped in `React.memo` with a custom equality function. Only rows whose IDs match the changed ticket re-render.
