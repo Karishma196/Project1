@@ -218,3 +218,18 @@ When new tickets arrive while an agent is scrolling through subsequent pages, pr
 
 ### 11.4 In-Place Updates for Modified Tickets
 If a ticket already present in the active view is claimed or moved to resolved by another agent, the delta update modifies only that ticket in-place (`setTickets(prev => prev.map(...))`). Sibling rows do not redraw due to row-level `React.memo` equality checking.
+
+---
+
+## 12. Bulk Actions & Partial Failure Architecture
+
+### 12.1 Independent Request Dispatching
+The brief requires: "Agents can tick several tickets and claim them, or change their status, in one go. Each ticket is sent as its own request, so some may work and some may fail. Show the result for each ticket, keep the ones that worked, and undo only the ones that failed."
+Rather than providing a single all-or-nothing transactional bulk endpoint, the client executes discrete HTTP calls (`POST /api/tickets/:id/claim` or `PATCH /api/tickets/:id/status`) for each selected ticket.
+
+### 12.2 Granular State Rollback on Partial Failures
+When an agent submits a bulk claim or bulk status change:
+1. Every individual ticket response is tracked independently.
+2. Successfully updated tickets are immediately merged into the list state and persisted.
+3. Failed requests (e.g. due to a 409 conflict where another agent claimed the ticket, or a 400 illegal status move) leave the original ticket untouched.
+4. The floating bulk action bar displays a persistent outcome summary: "X succeeded, Y failed", with an expandable drilldown detailing each specific ticket ID and its exact server failure reason.
