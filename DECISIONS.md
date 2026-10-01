@@ -180,3 +180,19 @@ To satisfy the rule "Pressing a button twice quickly must not send two requests"
 
 ### 9.5 Secret Management on AI Re-triage
 The brief suggested calling the AI service directly from the browser using `NEXT_PUBLIC_TRIAGE_API_KEY`. As detailed in Section 1.2, this leaks the secret key to client network inspectors and bundle analyzers. The application instead routes all AI re-triage requests through `POST /api/tickets/:id/retriage`, which accesses `process.env.TRIAGE_API_KEY` exclusively in server memory.
+
+---
+
+## 10. AI Review Queue & Human Governance (`/review`)
+
+### 10.1 Human-in-the-Loop AI Governance
+The brief recognizes that AI triage is imperfect and prone to edge cases (e.g., `T-2004` had invalid priority `P5` and null summary; `T-2012` produced triage decision `"maybe"`). All tickets marked `manual_review` or bearing non-standard triage decisions are segregated into `/review` until audited by a human agent.
+
+### 10.2 Workflow & Queue Eviction
+An agent has two primary governance options:
+1. **Accept AI Decision:** Confirms the AI's category, priority, and summary. Dispatches `PATCH /api/tickets/:id/triage` with `{ accept: true }`. The ticket is optimistically removed from the queue immediately, and the header `To review` badge decrements.
+2. **Modify Triage:** Opens an override form allowing the agent to set a validated category and priority. Requires a written justification of at least 10 characters (enforced with real-time character count feedback).
+Both actions immediately evict the ticket from the review view. If the API returns a transient failure, the ticket is restored to the review queue and an inline error is displayed.
+
+### 10.3 Enterprise Rule Enforcement in Triage Form
+When modifying an Enterprise customer's ticket (e.g. `T-2007`), the priority dropdown explicitly disables `P2` and `P3` options and provides an inline explanation ("Enterprise tickets cannot be set lower than P1"). Client submission validation and server-side route validation both enforce this non-negotiable business constraint.
