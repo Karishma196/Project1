@@ -196,3 +196,25 @@ Both actions immediately evict the ticket from the review view. If the API retur
 
 ### 10.3 Enterprise Rule Enforcement in Triage Form
 When modifying an Enterprise customer's ticket (e.g. `T-2007`), the priority dropdown explicitly disables `P2` and `P3` options and provides an inline explanation ("Enterprise tickets cannot be set lower than P1"). Client submission validation and server-side route validation both enforce this non-negotiable business constraint.
+
+---
+
+## 11. Live Updates & Real-Time Sync Strategy (`/api/tickets/updates`)
+
+### 11.1 Polling Cadence and Technical Rationale
+The application polls `/api/tickets/updates?since=<lastPollTimestamp>` every 7 seconds.
+- **Why 7 seconds:** The server simulation background timer triggers simulated ticket events every 6 seconds. A 7-second polling interval guarantees prompt delivery of events while avoiding network flooding.
+- **Delta Efficiency:** The endpoint transmits only tickets modified or created after the supplied `since` ISO timestamp (typically 1-3 tickets per poll, < 1 KB payload), avoiding expensive whole-dataset re-fetches.
+- **Why Polling over WebSockets:** Next.js Route Handlers and serverless deployment environments (e.g., Vercel) operate in stateless request-response lifecycles where persistent WebSocket connections require third-party socket clusters. Timestamped delta polling is resilient, self-healing, works across restarts, and requires zero external infrastructure.
+
+### 11.2 Preventing Viewport and Scroll Jumps
+The brief mandates: "New tickets must not make the list jump while an agent is reading. Show a banner such as '3 new tickets — show' instead."
+- When newly created tickets are detected in the delta stream, they are buffered in the Redux `liveUpdatesSlice`.
+- A floating pill banner appears (`NewTicketsBanner`: "N new tickets — show").
+- The visible list remains completely stationary. When the agent chooses to click the banner, the buffered tickets are prepended to the top of the list and the view scrolls smoothly to top.
+
+### 11.3 Stable Pagination and Drift Prevention
+When new tickets arrive while an agent is scrolling through subsequent pages, prepending them immediately causes "page drift" where existing tickets shift down across page boundaries, leading to duplicates or skipped items. By holding new tickets in the buffer banner, the active paginated list remains stable.
+
+### 11.4 In-Place Updates for Modified Tickets
+If a ticket already present in the active view is claimed or moved to resolved by another agent, the delta update modifies only that ticket in-place (`setTickets(prev => prev.map(...))`). Sibling rows do not redraw due to row-level `React.memo` equality checking.

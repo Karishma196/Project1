@@ -3,6 +3,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import StoreProvider from "@/store/StoreProvider";
 import { Header } from "@/components/Header";
+import { LiveUpdatesManager } from "@/components/LiveUpdatesManager";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -32,6 +33,7 @@ export default function RootLayout({
       <body className="min-h-full flex flex-col bg-neutral-50 font-sans text-neutral-900">
         <StoreProvider>
           <Header />
+          <LiveUpdatesManager />
           <main className="flex-1">{children}</main>
         </StoreProvider>
       </body>

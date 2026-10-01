@@ -10,6 +10,7 @@ import { TicketRow } from "@/components/TicketRow";
 import { MobileTicketCard } from "@/components/MobileTicketCard";
 import { BulkActionBar } from "@/components/BulkActionBar";
 import { NewTicketsBanner } from "@/components/NewTicketsBanner";
+import { TICKET_UPDATED_EVENT } from "@/components/LiveUpdatesManager";
 import {
   AlertCircle,
   RefreshCw,
@@ -96,6 +97,25 @@ function TicketsContent() {
     setSelectedIds([]);
     fetchTickets(1, false);
   }, [fetchTickets]);
+
+  // Listen for in-place live updates of existing tickets
+  useEffect(() => {
+    const handleTicketUpdates = (event: Event) => {
+      const customEvent = event as CustomEvent<Ticket[]>;
+      const modified = customEvent.detail;
+      if (!modified || modified.length === 0) return;
+
+      const modifiedMap = new Map(modified.map((t) => [t.external_id, t]));
+      setTickets((prev) =>
+        prev.map((t) => modifiedMap.get(t.external_id) || t)
+      );
+    };
+
+    window.addEventListener(TICKET_UPDATED_EVENT, handleTicketUpdates);
+    return () => {
+      window.removeEventListener(TICKET_UPDATED_EVENT, handleTicketUpdates);
+    };
+  }, []);
 
   const handleLoadMore = () => {
     if (currentPage < totalPages && !isLoadingMore) {
