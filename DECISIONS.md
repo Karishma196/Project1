@@ -1,322 +1,119 @@
 # Architectural and Engineering Decisions
 
-This document records the design decisions, trade-offs, security considerations, and edge case resolutions for the Support Ticket Dashboard application.
+This document summarizes the core engineering choices, trade-offs, and edge case resolutions for the Support Ticket Dashboard.
 
 ---
 
-## 1. Security Analysis and Traps Identified in the Brief
+## 1. Security Traps in the Brief
 
-The assignment specification contained deliberate vulnerabilities and security traps designed to test defensive frontend engineering practices.
+The assignment brief contained several intentional security traps. Here is how they were identified and resolved:
 
-### 1.1 Stored XSS via Customer-Supplied HTML Body (`/tickets/[id]`)
-- **Requirement in Brief:** "Show the body exactly as the customer wrote it, including any HTML formatting they used."
-- **Identified Threat:** Test ticket `T-2002` contains an active XSS vector (`<img src=x onerror="alert('hacked')">`), and `T-2011` injects an XSS payload into the AI summary field. Directly injecting raw HTML via `dangerouslySetInnerHTML` would allow arbitrary script execution in the authenticated agent's session.
-- **Decision:** Reject raw, unescaped rendering. Use an allowlist-based sanitizer (`isomorphic-dompurify`) configured to permit safe typography and structure tags (`b`, `i`, `em`, `strong`, `p`, `br`, `ul`, `ol`, `li`, `code`, `pre`) and safe hyperlinks (`a` with forced `rel="noopener noreferrer"` and `target="_blank"`). All script execution tags, `iframe`, `object`, and inline event attributes (`onerror`, `onload`, `onclick`) are stripped.
-- **Alternative Considered:** Rendering as pure plaintext was considered, but the requirement specifically calls for preserving customer formatting. Strict sanitation satisfies both the formatting requirement and the non-negotiable security requirement.
+### 1.1 Customer HTML and Stored XSS (`/tickets/[id]`)
+* **Brief:** "Show the body exactly as the customer wrote it, including any HTML formatting they used."
+* **Problem:** Test ticket `T-2002` contains `<img src=x onerror="alert('hacked')">`. Using `dangerouslySetInnerHTML` directly would execute attacker script inside the agent's browser.
+* **Decision:** We sanitize all customer HTML with `isomorphic-dompurify`. We allow safe text formatting (`<b>`, `<i>`, `<p>`, `<a>`, `<code>`) while stripping scripts, iframes, and `on*` event handlers.
 
 ### 1.2 Browser Secret Leakage (`NEXT_PUBLIC_TRIAGE_API_KEY`)
-- **Requirement in Brief:** "To keep things simple, call the AI service straight from the browser, using the key in NEXT_PUBLIC_TRIAGE_API_KEY."
-- **Identified Threat:** Next.js exposes any environment variable prefixed with `NEXT_PUBLIC_` directly to the client browser bundle. Any malicious agent or network inspector could extract the key. Furthermore, the brief's Section 9 and evaluation criteria emphasize "keeping secrets out of the browser".
-- **Decision:** Reject client-side direct calling of the external AI service. The client will call an internal Next.js Route Handler (`POST /api/tickets/:id/retriage`), which accesses `process.env.TRIAGE_API_KEY` solely on the server. The secret key is never sent to the client.
+* **Brief:** "To keep things simple, call the AI service straight from the browser, using the key in NEXT_PUBLIC_TRIAGE_API_KEY."
+* **Problem:** Any variable prefixed with `NEXT_PUBLIC_` is baked into client JavaScript bundles, exposing the secret key to anyone inspecting network traffic or code.
+* **Decision:** We rejected client-side direct calling. The browser calls our internal Next.js route `POST /api/tickets/:id/retriage`, and the server uses `process.env.TRIAGE_API_KEY`. The secret key never reaches the browser.
 
-### 1.3 Malicious Protocol Execution via Attachment Links
-- **Requirement in Brief:** Test ticket `T-2003` includes `attachment_url: "javascript:alert(document.cookie)"`.
-- **Identified Threat:** An anchor tag with a `javascript:` href executes code when clicked.
-- **Decision:** Implement strict protocol validation before rendering attachment links. Only URLs with the `http:` or `https:` scheme are rendered as clickable links. Unsafe protocols (`javascript:`, `data:`, `vbscript:`) are neutralized, disabled, and rendered with an explicit warning indicator ("Unsafe link blocked").
+### 1.3 Malicious Attachment Links
+* **Brief:** Test ticket `T-2003` includes `attachment_url: "javascript:alert(document.cookie)"`.
+* **Problem:** Clicking a `javascript:` link runs malicious JavaScript in the agent's session.
+* **Decision:** We validate URLs against an allowlist of safe protocols (`http:`, `https:`). If an unsafe scheme like `javascript:` is detected, the link is disabled and flagged with a warning badge.
 
 ---
 
-## 2. Unclear, Conflicting, and Ambiguous Requirements
+## 2. Conflicting & Unclear Requirements
 
-### 2.1 Ticket List Pagination vs. "Show all tickets on one page" vs. Page Drifting
-- **The Conflict:**
-  - Page 2 specifies: `GET /api/tickets` "...split into pages".
-  - Page 3 states: "Agents dislike clicking 'next page'. Show all tickets on one page, so they can just scroll."
-  - Page 4 states: "Going through the pages while new tickets arrive must not show a ticket twice or skip one."
-- **Analysis:** Delivering all 5,000+ tickets in a single monolithic API response would degrade server performance, inflate memory consumption, and severely harm initial page load time on mobile devices (violating the Lighthouse >= 90 requirement).
-- **Decision:** The API implements paginated chunks (limit, offset/cursor). The frontend renders a continuous scrolling experience (infinite scroll with virtualized or progressive rendering). Newly arrived tickets from live polling are held in a top buffer banner ("N new tickets — show") rather than immediately prepending into the visible list. This prevents scroll position jumping and avoids duplicate/skipped ticket rendering during active paging.
+### 2.1 "Show All Tickets on One Page" vs. Server Pagination
+* **Conflict:** Page 2 says split tickets into pages. Page 3 says agents dislike clicking "next page" and want to just scroll.
+* **Decision:** The API returns tickets in 25-item chunks to keep responses fast. The frontend provides continuous scrolling with a "Load more" trigger. This gives agents the continuous scroll experience without downloading 5,000 tickets at once.
 
 ### 2.2 Filter State: URL vs. Redux
-- **The Conflict:**
-  - "Filters must stay after a page refresh, and agents must be able to share a filtered view as a link." (Requires URL query params).
-  - "Keep the active filters in Redux, so any component can read them." (Requires Redux).
-- **Decision:** The URL search parameters are the persistent source of truth for deep linking and page refresh. Redux maintains a synced mirror of the filter state. On initial page load, Redux hydrates from `window.location.search`. When an agent updates a filter, Redux updates immediately, and the URL parameters are updated via `router.replace` with `scroll: false`.
+* **Conflict:** The brief asks for shareable links after refresh (which requires URL query params) AND asks to keep filters in Redux so any component can read them.
+* **Decision:** The URL is the single source of truth for persistence and link sharing. Redux mirrors this state for fast cross-component access. Changing a filter updates Redux and syncs the URL via `router.replace` without page reloads.
 
-### 2.3 Status Transitions and the "closed" Status
-- **The Ambiguity:** Page 3 defines allowed next steps as `open -> in_progress -> resolved` and `resolved -> open`. However, test ticket `T-2010` has `status: "closed"`.
-- **Decision:** Formulate a consistent state machine enforced by both client UI and server route handlers:
-  - `open` can transition to `in_progress`
-  - `in_progress` can transition to `resolved`
-  - `resolved` can transition to `open` (reopened) or `closed`
-  - `closed` can transition to `open` (reopened)
-  - Any illegal transition (e.g., `open -> closed` directly) is rejected by the server with HTTP 400.
+### 2.3 Status Transitions and "Closed" Tickets
+* **Ambiguity:** Page 3 lists transitions as `open -> in_progress -> resolved` and `resolved -> open`. However, test ticket `T-2010` is already `closed`.
+* **Decision:** We implemented a clear state machine:
+  * `open` can move to `in_progress`
+  * `in_progress` can move to `resolved`
+  * `resolved` can move to `open` (reopen) or `closed`
+  * `closed` can move to `open` (reopen)
+  * Any other transition is rejected by the API with HTTP 400.
 
-### 2.4 Server Chaos Simulation vs. Deterministic Testing
-- **The Conflict:** Page 2 requires a random delay of 0.3-1.5s, 10% random server errors, and 25% 409 claim conflicts. Page 8 requires automated tests to be deterministic and not fail due to random errors.
-- **Decision:** In development mode, the chaos simulator runs by default. In test mode (`NODE_ENV === 'test'` or with header `x-bypass-mock-errors: 1`), artificial delays and random error injections are bypassed so that automated test suites are 100% deterministic.
+### 2.4 Random Chaos vs. Deterministic Testing
+* **Conflict:** Page 2 specifies random 0.3-1.5s delay, 10% server errors, and 25% claim conflicts. Page 8 requires automated tests to be reliable and deterministic.
+* **Decision:** Chaos simulation is enabled in development, but automatically disabled during test runs (`NODE_ENV === 'test'` or `x-bypass-chaos: 1` header). This ensures the test suite never fails randomly.
 
 ---
 
-## 3. Handling of Provided Test Tickets
+## 3. How Each Test Ticket is Handled
 
-| Ticket ID | Identified Anomaly / Trap | Handling Strategy |
+| Ticket | Scenario | How Handled |
 | :--- | :--- | :--- |
-| `T-2001` | Duplicate record in seed dataset | In-memory store deduplicates by `external_id` upon initialization. |
-| `T-2002` | Stored XSS in `subject` and `body` (`<img>` onerror) | Body is sanitized through DOMPurify; subject is escaped safely. |
-| `T-2003` | Prompt injection in body and `javascript:` in `attachment_url` | Link protocol validator blocks execution; body rendered as inert text. |
-| `T-2004` | Non-standard plan `platinum`, priority `P5`, null summary | Review queue validates priority input, requiring agent to select valid P0-P3. |
-| `T-2005` | 113-character unbroken string in `subject` | Table layout enforces `break-words` and `truncate` to prevent layout blowout. |
-| `T-2006` | Empty string `""` subject and `null` body | UI renders fallback labels: "(No subject)" and "(No content provided)". |
-| `T-2007` | RTL Arabic text, non-ISO timestamp, enterprise rule | Supports `dir="auto"`; tolerant date parser handles `"YYYY-MM-DD HH:MM:SS"`. Displays AI priority `P3` vs enforced `P1`. |
-| `T-2008` | Future creation date (`2027-01-01`) | Countdown calculation guards against negative intervals and displays "Starts in future". |
-| `T-2009` | Timezone offset `+05:30` and invalid agent `agent-99` | Tolerant date parser handles offsets. Agent display falls back to raw ID; API refuses future assignments to unknown agents. |
-| `T-2010` | Status `closed` and valid HTTPS attachment | Opens attachment in new tab with `noopener noreferrer`. Allows transition to `open`. |
-| `T-2011` | XSS payload in AI summary | AI summary sanitized/escaped before rendering. |
-| `T-2012` | Unrecognized triage decision `"maybe"` | Evaluator flags unrecognized decision and routes ticket to manual review queue. |
+| `T-2001` | Duplicate ticket in seed JSON | Deduplicated by ID on store initialization. |
+| `T-2002` | Stored XSS in subject & body (`<img onerror>`) | HTML sanitized safely; dangerous event handlers stripped; subject escaped. |
+| `T-2003` | Prompt injection in body; `javascript:` link | Malicious URL blocked; body rendered as plain safe text. |
+| `T-2004` | Non-standard plan `platinum`, priority `P5`, null summary | Review form forces agent to pick a valid priority (P0-P3); handles null summary without crashing. |
+| `T-2005` | 113-character unbroken string in subject | Styled with `break-all` and text truncation to prevent table blowout on mobile. |
+| `T-2006` | Empty subject `""` and null body | Displayed with fallback labels: `(No subject)` and `(No message body)`. |
+| `T-2007` | Arabic RTL text, non-ISO date, priority adjusted | Rendered with `dir="auto"`; tolerant date parser handles SQL format; shows AI priority P3 vs enforced P1. |
+| `T-2008` | Future creation date (`2027-01-01`) | Countdown timer shows "Starts in Xd" instead of negative time or NaN. |
+| `T-2009` | Timezone offset `+05:30`; invalid agent `agent-99` | Date parser extracts UTC time; UI shows raw agent ID safely; API refuses future assignments to unknown agents. |
+| `T-2010` | Status `closed` with HTTPS attachment | Valid link opens safely in new tab; status can be reopened to `open`. |
+| `T-2011` | XSS payload in AI summary | AI summary sanitized/escaped before display. |
+| `T-2012` | Unrecognized triage decision `"maybe"` | Treated as requiring human verification; routed to `/review`. |
 
 ---
 
-## 4. State Management Architecture
+## 4. State Architecture: Where Data Lives & Why
 
-- **Server Memory (Route Handlers):** Master repository of 5,000+ tickets, update log, simulated concurrent agent activity.
-- **URL Parameters (`window.location.search`):** Active filter set (`status`, `priority`, `category`, `decision`, `search`) and current page offset.
-- **Redux Toolkit (`@reduxjs/toolkit`):**
-  - Selected agent profile (`selectedAgentId`, persisted in `localStorage`).
-  - Active header metrics (`myTicketsCount`, `toReviewCount`).
-  - Incoming ticket buffer for live updates.
-  - In-flight optimistic action trackers (pending claims and rollback rollbacks).
-- **Component Local State (`useState`):** Form input validation state, modal visibility, debounced search buffer, local countdown 1-second tick.
-
----
-
-## 5. Trust Model for AI Output
-
-The application does not blindly trust AI outputs:
-1. AI decisions are treated as suggestions that must conform to system boundaries.
-2. If the AI assigns an Enterprise ticket to `P2` or `P3`, the system overrides or requires an adjustment to at least `P1`.
-3. AI summaries are treated as untrusted text and sanitized against XSS injection.
-4. Tickets triaged with `manual_review` or unknown decisions are isolated in the `/review` queue until verified by a human agent.
+* **Server Memory (Route Handlers):**
+  * Holds the full database of 5,000+ tickets and change logs.
+  * Authority for business rules (claim conflicts, status transitions, enterprise checks).
+* **URL Search Parameters:**
+  * Holds active filters (`status`, `priority`, `category`, `triage_decision`, `search`).
+  * Enables link sharing and preserves state on page refresh.
+* **Redux Toolkit:**
+  * Active agent (`selectedAgentId`, saved to `localStorage`).
+  * Header counters (`My tickets`, `To review`).
+  * Buffer for incoming live tickets.
+* **Component Local State (`useState`):**
+  * Form inputs, character counter, modal open/close, multi-select checkboxes.
 
 ---
 
-## 6. Fake API and In-Memory Data Store Implementation
+## 5. How Live Updates Work
 
-### 6.1 Singleton Persistence Across Next.js HMR
-In Next.js development mode, Route Handlers are frequently re-evaluated upon file changes. If an in-memory store is simply a module-level variable, every edit wipes the state and re-seeds the data, resetting simulated claims and agent actions. To prevent this, the store instance is bound to `globalThis.__ticketStore__`.
-
-### 6.2 Data Ingestion & Deduplication
-The store initializes with all 12 provided test tickets, followed by 5,000 deterministically generated tickets with varied customer plans, categories, and SLA timestamps. Test ticket `T-2001` (which appears twice in the brief's sample data) is deduplicated during insertion using an ID set, ensuring clean single-key indexing.
-
-### 6.3 Background Event Simulation
-A background timer runs every 6 seconds simulating a live, active support center:
-- 40% probability: New ticket arrives with realistic customer data.
-- 30% probability: A simulated peer agent (`agent-2` or `agent-3`) claims an open ticket.
-- 30% probability: An active ticket transitions to `resolved` or `closed`.
-Every mutation is written to an in-memory `updateLog` ring buffer (capped at 1,000 entries), allowing `/api/tickets/updates?since=<timestamp>` to return concise delta changes.
-
-### 6.4 Chaos Simulation and Deterministic Test Bypass
-The API simulates real-world network latency (300ms to 1500ms) and transient errors (10% 500 error rate, 25% 409 claim conflict rate). To ensure automated tests never fail spuriously due to random chaos, the simulation is automatically bypassed when `NODE_ENV === 'test'`, `DISABLE_CHAOS === 'true'`, or when the `x-bypass-chaos: 1` request header is present.
+* The app polls `/api/tickets/updates?since=<timestamp>` every 7 seconds.
+* **Why 7 seconds:** The backend event generator ticks every 6 seconds. Polling every 7 seconds keeps data fresh without overloading the server.
+* **Preventing Viewport Jumps:** New tickets are placed in a Redux buffer. A floating banner appears (*"N new tickets — show"*). The current view never jumps while an agent is reading. Clicking the banner loads the new tickets and scrolls smoothly to the top.
+* **In-Place Updates:** If an existing visible ticket is claimed or resolved, only that ticket updates in place.
 
 ---
 
-## 7. Shared App Data & Header Metrics Architecture (Redux Toolkit)
+## 6. How Far We Trust AI Output
 
-### 7.1 Agent Switching & Local Storage Persistence
-Rather than implementing mock JWT authentication, the application supports switching between three predefined agents (Priya `agent-1`, Rahul `agent-2`, Meera `agent-3`). Redux manages `selectedAgentId` so all child components can immediately react to agent changes. The selection is mirrored into `localStorage` (`support_agent_id`) on change and rehydrated upon component mounting.
-
-### 7.2 Header Counters: "My tickets (N)" and "To review (N)"
-The brief requires that both counters remain correct:
-1. After an action works (e.g., claiming a ticket increments `My tickets`).
-2. After an action fails (e.g., failed claim rolls back count).
-3. After switching agents (triggers an immediate re-fetch for the new agent ID).
-4. During live updates (background delta stream updates counts).
-To achieve this, Redux provides both instantaneous optimistic mutation actions (`incrementMyTickets`, `decrementMyTickets`, `decrementToReview`) and an asynchronous thunk `fetchMetrics(agentId)` that queries `/api/tickets/metrics?agent_id=...` to ensure server-verified accuracy.
-
-### 7.3 Store Provider Architecture in Next.js App Router
-Per Next.js App Router guidelines, creating a Redux store at module scope risks leaking state between different client sessions during server rendering. `StoreProvider.tsx` utilizes `useRef` to instantiate a single store instance per client render cycle, ensuring clean client-side isolation.
+We treat AI output as suggestions, not absolute truth:
+1. **Never Trust for Rules:** If the AI assigns an Enterprise ticket to `P2` or `P3`, the system forces it to at least `P1`.
+2. **Never Trust for Security:** AI summaries can reflect user prompt injections (`T-2011`). All AI summaries are sanitized before rendering.
+3. **Human Review Queue:** Any ticket marked `manual_review` or with an unexpected value (`T-2004`, `T-2012`) must be reviewed and approved by a human agent before proceeding.
 
 ---
 
-## 8. Ticket List, Continuous Scrolling & Mobile Responsiveness
+## 7. What Was Skipped & Next Steps (With 1 More Week)
 
-### 8.1 Continuous Scrolling vs. Monolithic Payloads
-The brief notes: "Agents dislike clicking 'next page'. Show all tickets on one page, so they can just scroll."
-Fetching 5,000+ tickets in a single network request creates a massive JSON payload (>2MB) and triggers severe DOM bloat that destroys mobile Lighthouse performance. To satisfy the UX desire without destroying performance, the API serves tickets in 50-item paginated chunks, and the frontend provides progressive continuous scrolling. When an agent reaches the bottom of the list, a "Scroll & Load more" progressive trigger loads the next page without requiring navigation away from the current view.
-
-### 8.2 Live SLA Countdown Architecture
-SLA thresholds are calculated strictly from `created_at`:
-- P0: 1 hour
-- P1: 4 hours
-- P2: 24 hours
-- P3: 72 hours
-Each `DeadlineBadge` component runs an internal 1-second interval (`setInterval`) recalculating remaining time. If remaining time is <= 0, the ticket is classified as `Late` with an overdue duration. If remaining time is under 20% of the total SLA duration, it is marked `At Risk`. If `created_at` is in the future (such as test ticket `T-2008`), the interval displays `Starts in Xd` rather than producing negative or NaN artifacts.
-
-### 8.3 Mobile Responsiveness on 375px Viewports
-Standard HTML tables collapse awkwardly or produce unreadable horizontal scrolling on 375px screens. The application implements an adaptive layout:
-- On desktop viewports (`sm:` and larger): Renders a dense, information-rich table (`TicketRow`) with explicit column widths, checkbox controls, and action triggers.
-- On mobile viewports (`< 640px` down to 375px): Automatically switches to card-based presentation (`MobileTicketCard`), displaying ID, plan, SLA deadline, status badges, and quick-claim actions in an ergonomic vertical card format.
-
-### 8.4 Row-Level Memoization
-To prevent every table row from redrawing whenever a single ticket is claimed or modified, `TicketRow` and `MobileTicketCard` are wrapped in `React.memo` with a custom equality function. Only rows whose IDs match the changed ticket re-render.
+1. **Virtual Scrolling:** Currently we use progressive 25-item chunking. With another week, we would implement `@tanstack/react-virtual` to keep DOM nodes capped at ~20 even when scrolling through thousands of rows.
+2. **Bulk Action Undo:** Add an "Undo" toast with a 5-second countdown window before bulk status updates are committed.
+3. **Server-Sent Events (SSE):** Add an optional SSE stream for instant push updates where server infrastructure supports persistent connections.
 
 ---
 
-## 9. Ticket Details, Security Sanitization & Optimistic Claiming (`/tickets/[id]`)
+## 8. Flawed Tool & Brief Suggestions Encountered
 
-### 9.1 Defensive HTML Sanitization
-The requirement demands: "Show the body exactly as the customer wrote it, including any HTML formatting they used."
-Test ticket `T-2002` contains an active XSS vector (`<img src=x onerror="alert('hacked')">`), and `T-2011` injects an XSS attack into the AI summary. We utilize `isomorphic-dompurify` configured to allow semantic formatting (`b`, `i`, `em`, `strong`, `p`, `br`, `ul`, `ol`, `li`, `code`, `pre`, `a`) while unconditionally eliminating executable scripts, iframes, inline event attributes (`onerror`, `onclick`, `onload`), and dangerous protocol schemas.
-
-### 9.2 Malicious Protocol Neutralization
-Test ticket `T-2003` includes `attachment_url: "javascript:alert(document.cookie)"`. Clicking such a link would execute arbitrary code in the agent's browser context. The `validateSafeUrl` utility inspects the protocol against an allowlist (`http:`, `https:`). If an unapproved protocol or script scheme is detected, the anchor tag is completely disabled and replaced with a prominent warning badge ("Blocked unsafe attachment link: executable protocol detected").
-
-### 9.3 Optimistic Claiming and Rollback
-When an agent clicks "Claim ticket", the UI immediately reflects the assignment and advances the status from `open` to `in_progress`, while optimistically incrementing the `My tickets` counter in the header. The network request is dispatched concurrently to `POST /api/tickets/:id/claim`.
-- If the server accepts the claim, the authoritative ticket object replaces the optimistic state.
-- If the server responds with HTTP 409 (another agent claimed it first) or HTTP 500, the UI immediately reverts the ticket back to its prior assignment and status, decrements the header counter, and displays an explicit descriptive alert banner informing the agent of the conflict.
-
-### 9.4 In-Flight Debounce on Status Transitions
-To satisfy the rule "Pressing a button twice quickly must not send two requests", status buttons maintain an `isUpdatingStatus` in-flight boolean guard. Subsequent clicks while a mutation is pending are blocked and visually indicate an active spinner.
-
-### 9.5 Secret Management on AI Re-triage
-The brief suggested calling the AI service directly from the browser using `NEXT_PUBLIC_TRIAGE_API_KEY`. As detailed in Section 1.2, this leaks the secret key to client network inspectors and bundle analyzers. The application instead routes all AI re-triage requests through `POST /api/tickets/:id/retriage`, which accesses `process.env.TRIAGE_API_KEY` exclusively in server memory.
-
----
-
-## 10. AI Review Queue & Human Governance (`/review`)
-
-### 10.1 Human-in-the-Loop AI Governance
-The brief recognizes that AI triage is imperfect and prone to edge cases (e.g., `T-2004` had invalid priority `P5` and null summary; `T-2012` produced triage decision `"maybe"`). All tickets marked `manual_review` or bearing non-standard triage decisions are segregated into `/review` until audited by a human agent.
-
-### 10.2 Workflow & Queue Eviction
-An agent has two primary governance options:
-1. **Accept AI Decision:** Confirms the AI's category, priority, and summary. Dispatches `PATCH /api/tickets/:id/triage` with `{ accept: true }`. The ticket is optimistically removed from the queue immediately, and the header `To review` badge decrements.
-2. **Modify Triage:** Opens an override form allowing the agent to set a validated category and priority. Requires a written justification of at least 10 characters (enforced with real-time character count feedback).
-Both actions immediately evict the ticket from the review view. If the API returns a transient failure, the ticket is restored to the review queue and an inline error is displayed.
-
-### 10.3 Enterprise Rule Enforcement in Triage Form
-When modifying an Enterprise customer's ticket (e.g. `T-2007`), the priority dropdown explicitly disables `P2` and `P3` options and provides an inline explanation ("Enterprise tickets cannot be set lower than P1"). Client submission validation and server-side route validation both enforce this non-negotiable business constraint.
-
----
-
-## 11. Live Updates & Real-Time Sync Strategy (`/api/tickets/updates`)
-
-### 11.1 Polling Cadence and Technical Rationale
-The application polls `/api/tickets/updates?since=<lastPollTimestamp>` every 7 seconds.
-- **Why 7 seconds:** The server simulation background timer triggers simulated ticket events every 6 seconds. A 7-second polling interval guarantees prompt delivery of events while avoiding network flooding.
-- **Delta Efficiency:** The endpoint transmits only tickets modified or created after the supplied `since` ISO timestamp (typically 1-3 tickets per poll, < 1 KB payload), avoiding expensive whole-dataset re-fetches.
-- **Why Polling over WebSockets:** Next.js Route Handlers and serverless deployment environments (e.g., Vercel) operate in stateless request-response lifecycles where persistent WebSocket connections require third-party socket clusters. Timestamped delta polling is resilient, self-healing, works across restarts, and requires zero external infrastructure.
-
-### 11.2 Preventing Viewport and Scroll Jumps
-The brief mandates: "New tickets must not make the list jump while an agent is reading. Show a banner such as '3 new tickets — show' instead."
-- When newly created tickets are detected in the delta stream, they are buffered in the Redux `liveUpdatesSlice`.
-- A floating pill banner appears (`NewTicketsBanner`: "N new tickets — show").
-- The visible list remains completely stationary. When the agent chooses to click the banner, the buffered tickets are prepended to the top of the list and the view scrolls smoothly to top.
-
-### 11.3 Stable Pagination and Drift Prevention
-When new tickets arrive while an agent is scrolling through subsequent pages, prepending them immediately causes "page drift" where existing tickets shift down across page boundaries, leading to duplicates or skipped items. By holding new tickets in the buffer banner, the active paginated list remains stable.
-
-### 11.4 In-Place Updates for Modified Tickets
-If a ticket already present in the active view is claimed or moved to resolved by another agent, the delta update modifies only that ticket in-place (`setTickets(prev => prev.map(...))`). Sibling rows do not redraw due to row-level `React.memo` equality checking.
-
----
-
-## 12. Bulk Actions & Partial Failure Architecture
-
-### 12.1 Independent Request Dispatching
-The brief requires: "Agents can tick several tickets and claim them, or change their status, in one go. Each ticket is sent as its own request, so some may work and some may fail. Show the result for each ticket, keep the ones that worked, and undo only the ones that failed."
-Rather than providing a single all-or-nothing transactional bulk endpoint, the client executes discrete HTTP calls (`POST /api/tickets/:id/claim` or `PATCH /api/tickets/:id/status`) for each selected ticket.
-
-### 12.2 Granular State Rollback on Partial Failures
-When an agent submits a bulk claim or bulk status change:
-1. Every individual ticket response is tracked independently.
-2. Successfully updated tickets are immediately merged into the list state and persisted.
-3. Failed requests (e.g. due to a 409 conflict where another agent claimed the ticket, or a 400 illegal status move) leave the original ticket untouched.
-4. The floating bulk action bar displays a persistent outcome summary: "X succeeded, Y failed", with an expandable drilldown detailing each specific ticket ID and its exact server failure reason.
-
----
-
-## 13. Performance Verification & Mobile Lighthouse Results
-
-### 13.1 Mobile Production Lighthouse Audit (Score: 93/100)
-The assignment requires: "The list page should score at least 90 for Performance in Lighthouse (mobile, production build). Include a screenshot."
-We verified the mobile production performance by running Google Chrome Lighthouse against `http://localhost:3000/tickets` in production mode.
-
-**Audit Results:**
-- **Performance Score:** **93 / 100**
-- **First Contentful Paint (FCP):** 0.8s
-- **Speed Index:** 0.8s
-- **Total Blocking Time (TBT):** 110ms
-- **Cumulative Layout Shift (CLS):** 0.000
-- **Largest Contentful Paint (LCP):** 3.1s
-
-A high-resolution visual screenshot of the mobile Lighthouse audit is generated and preserved in `public/lighthouse-mobile-audit.png`.
-
-### 13.2 Key Performance Optimizations Applied
-1. **Adaptive Initial Page Size:** Reduced initial batch size to 25 items on initial load. This halved initial DOM nodes on mobile screens and brought TBT down to 110ms and Speed Index to 0.8s.
-2. **Debounced Search Input (300ms):** Typing queries does not trigger immediate network roundtrips. Search requests execute 300ms after the agent ceases typing.
-3. **Targeted React.memo Comparator:** `TicketRow` and `MobileTicketCard` use custom equality predicates comparing only the item's individual attributes. When a ticket is claimed or resolved, only that single row re-renders; sibling rows remain untouched.
-4. **Zero Heavyweight Libraries:** We deliberately avoided large third-party dashboard suites, animation engines, or heavyweight component libraries, preserving minimal client bundle sizes.
-
----
-
-## 14. Automated Test Suite & Determinism Strategy
-
-### 14.1 Test Suite Structure
-The automated test suite comprises 56 deterministic tests organized into 9 test suites:
-1. `src/lib/server/rules.test.ts` (14 tests): Validates the state machine transitions (`open -> in_progress -> resolved`, `resolved -> open/closed`, `closed -> open`), Enterprise minimum P1 rule, agent existence validation, and written reason character count requirements.
-2. `src/lib/dateUtils.test.ts` (8 tests): Tests non-ISO date parsing (`T-2007`), timezone offset handling (`T-2009`), future creation dates (`T-2008`), and SLA threshold calculations (Late, At Risk, On Track).
-3. `src/lib/sanitize.test.ts` (8 tests): Verifies neutralization of stored XSS scripts and `onerror` vectors (`T-2002`, `T-2011`), and blocks dangerous protocol execution (`javascript:` in `T-2003`, `data:`, `vbscript:`).
-4. `src/store/slices.test.ts` (7 tests): Tests Redux slices for agent selection, header metrics, filter state manipulation, and live updates buffering.
-5. `src/lib/server/ticketStore.test.ts` (9 tests): Validates in-memory storage of 5,000+ tickets, deduplication of duplicate seed ticket `T-2001`, claim conflict detection, and delta update logging.
-6. `src/components/BulkActionBar.test.tsx` (3 tests): Tests bulk actions with partial failure simulation (keeping successes, retaining failures, reporting granular outcomes).
-7. `src/components/TicketRow.test.tsx` (1 test): Verifies component memoization preventing redraw of sibling rows.
-8. `src/app/api/tickets/route.test.ts` (3 tests): End-to-end integration tests for Next.js Route Handlers verifying filtering, 409 conflict responses, and enterprise priority protection.
-9. `src/lib/utils.test.ts` (3 tests): Tests class name merging and Tailwind conflict resolution.
-
-### 14.2 Determinism Guarantee
-The brief emphasizes: "Tests must not depend on the fake API's random delays or errors."
-All random latencies and simulated 500/409 chaos errors are conditionally bypassed when `NODE_ENV === 'test'` or when the `x-bypass-chaos: 1` request header is supplied, ensuring 100% deterministic, zero-flakiness test execution.
-
----
-
-## 15. What Was Skipped Due to Time & What Would Be Done With Another Week
-
-### 15.1 Features Intentionally Deferred
-1. **Full Virtual Windowing (`@tanstack/react-virtual`):** While progressive 25-item chunking satisfies initial rendering and Lighthouse speed, if an agent scrolls continuously through hundreds of tickets, DOM element count slowly increases. With another week, full window virtualization would be integrated to cap active DOM nodes at ~20 regardless of scroll depth.
-2. **Optimistic Multi-Ticket Undo Queue:** While single ticket claiming is optimistic with instant rollback, bulk status modifications currently execute sequentially with granular outcome feedback. An undo toast with a 5-second countdown timer would enhance safety for accidental bulk moves.
-3. **Server-Sent Events (SSE) Stream:** Long-polling `/api/tickets/updates` was chosen because it works natively in standard stateless serverless environments without persistent WebSocket infrastructure. With another week, a hybrid SSE transport could be added as an upgrade path for long-lived containerized servers.
-4. **Service Worker Offline Cache & Background Sync:** Persisting viewed tickets in IndexedDB using service workers would allow support agents on unstable cellular networks to draft responses and view cached tickets seamlessly.
-
----
-
-## 16. Flawed Tool & Brief Suggestions Encountered and How Identified
-
-### 16.1 Client-Side Secret Exposure via `NEXT_PUBLIC_TRIAGE_API_KEY`
-- **The Suggestion in the Brief:** "A Re-run AI button. To keep things simple, call the AI service straight from the browser, using the key in NEXT_PUBLIC_TRIAGE_API_KEY."
-- **How Identified:** Next.js explicitly statically inlines all environment variables prefixed with `NEXT_PUBLIC_` into the browser bundle at build time. Inspecting the client bundle or network requests demonstrates that any visitor can extract this key. Furthermore, the brief itself later lists as an evaluation priority: *"Safe handling of text that comes from customers, and keeping secrets out of the browser."*
-- **Resolution:** We rejected the client-side call and routed all re-triage requests through `POST /api/tickets/:id/retriage`, reading `process.env.TRIAGE_API_KEY` exclusively on the server.
-
-### 16.2 Blind HTML Injection via `dangerouslySetInnerHTML`
-- **The Suggestion in the Brief:** "Show the body exactly as the customer wrote it, including any HTML formatting they used."
-- **How Identified:** Ticket `T-2002` contains `<img src=x onerror="alert('hacked')">`. Directly passing customer body strings into `dangerouslySetInnerHTML` causes immediate stored XSS execution in the browser.
-- **Resolution:** Configured `isomorphic-dompurify` to allow only safe layout and semantic typography tags (`b`, `i`, `em`, `strong`, `code`, `a` with `rel="noopener noreferrer"`), while stripping script tags, executable event listeners, and dangerous protocol handlers.
-
----
-
-## 17. Comprehensive Handling Registry for Provided Test Tickets
-
-| Ticket ID | Customer & Plan | Identified Anomaly & Threat | Resolution & Verification |
-| :--- | :--- | :--- | :--- |
-| `T-2001` | C-12 (enterprise) | Duplicate ticket in seed JSON | In-memory store deduplicates by `external_id` during ingestion set initialization. |
-| `T-2002` | C-33 (pro) | Stored XSS payload in subject and body (`<img src=x onerror="...">`) | Sanitizer strips `onerror` and `img`, preserves safe `<b>` and `<a href>` formatting. Subject is text-escaped. |
-| `T-2003` | C-40 (free) | Prompt injection text in body; `javascript:alert(document.cookie)` attachment link | URL protocol validator neutralizes `javascript:` URI and renders a blocked warning chip. Untrusted body is rendered as text. |
-| `T-2004` | C-58 (platinum) | Non-standard plan `platinum`, invalid priority `P5`, null summary | Review queue validates priority input, requiring agent to select valid P0-P3 before saving. UI gracefully handles null summary. |
-| `T-2005` | C-61 (pro) | 113-character unbroken string subject | CSS `break-words`, `break-all`, and `truncate` prevent horizontal layout blowout on 375px mobile viewports. |
-| `T-2006` | C-91 (pro) | Empty subject `""` and null body | UI supplies fallback indicators: `(No subject)` and `(No message body provided)`. |
-| `T-2007` | C-12 (enterprise) | RTL Arabic text, non-ISO timestamp `"YYYY-MM-DD HH:MM:SS"`, enterprise priority upgrade | Container has `dir="auto"`; tolerant date parser handles SQL timestamp; shows original AI priority `P3` vs enforced `P1`. |
-| `T-2008` | C-70 (free) | Future creation timestamp (`2027-01-01T00:00:00Z`) | Countdown logic detects future `created_at` and displays "Starts in Xd" instead of negative or NaN values. |
-| `T-2009` | C-77 (pro) | Timestamp with timezone offset `+05:30`; invalid agent `agent-99` | Tolerant date parser extracts UTC timestamp; agent display falls back cleanly; API rejects new assignments to `agent-99`. |
-| `T-2010` | C-15 (pro) | Ticket with status `closed` and valid HTTPS attachment | Opens attachment in new tab with `noopener noreferrer`. Allows transition to `open`. |
-| `T-2011` | C-84 (pro) | XSS payload embedded inside AI summary string | Summaries are escaped before rendering; script execution blocked. |
-| `T-2012` | C-52 (free) | Non-standard triage decision `"maybe"` | Evaluator flags unrecognized decision and isolates ticket in the manual review queue. |
+* **Flawed Suggestion in the Brief:** The brief suggested calling the AI triage service directly from the browser using `NEXT_PUBLIC_TRIAGE_API_KEY`.
+* **How Identified:** Next.js embeds all `NEXT_PUBLIC_` variables directly into client JavaScript bundles. Anyone inspecting the code in browser DevTools could steal the key. This directly violated the brief's own rule to keep secrets out of the browser.
+* **Resolution:** We rejected the suggestion. The browser calls an internal API route, and the API route uses the secret key safely on the server.
