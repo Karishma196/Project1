@@ -277,3 +277,46 @@ The automated test suite comprises 56 deterministic tests organized into 9 test 
 ### 14.2 Determinism Guarantee
 The brief emphasizes: "Tests must not depend on the fake API's random delays or errors."
 All random latencies and simulated 500/409 chaos errors are conditionally bypassed when `NODE_ENV === 'test'` or when the `x-bypass-chaos: 1` request header is supplied, ensuring 100% deterministic, zero-flakiness test execution.
+
+---
+
+## 15. What Was Skipped Due to Time & What Would Be Done With Another Week
+
+### 15.1 Features Intentionally Deferred
+1. **Full Virtual Windowing (`@tanstack/react-virtual`):** While progressive 25-item chunking satisfies initial rendering and Lighthouse speed, if an agent scrolls continuously through hundreds of tickets, DOM element count slowly increases. With another week, full window virtualization would be integrated to cap active DOM nodes at ~20 regardless of scroll depth.
+2. **Optimistic Multi-Ticket Undo Queue:** While single ticket claiming is optimistic with instant rollback, bulk status modifications currently execute sequentially with granular outcome feedback. An undo toast with a 5-second countdown timer would enhance safety for accidental bulk moves.
+3. **Server-Sent Events (SSE) Stream:** Long-polling `/api/tickets/updates` was chosen because it works natively in standard stateless serverless environments without persistent WebSocket infrastructure. With another week, a hybrid SSE transport could be added as an upgrade path for long-lived containerized servers.
+4. **Service Worker Offline Cache & Background Sync:** Persisting viewed tickets in IndexedDB using service workers would allow support agents on unstable cellular networks to draft responses and view cached tickets seamlessly.
+
+---
+
+## 16. Flawed Tool & Brief Suggestions Encountered and How Identified
+
+### 16.1 Client-Side Secret Exposure via `NEXT_PUBLIC_TRIAGE_API_KEY`
+- **The Suggestion in the Brief:** "A Re-run AI button. To keep things simple, call the AI service straight from the browser, using the key in NEXT_PUBLIC_TRIAGE_API_KEY."
+- **How Identified:** Next.js explicitly statically inlines all environment variables prefixed with `NEXT_PUBLIC_` into the browser bundle at build time. Inspecting the client bundle or network requests demonstrates that any visitor can extract this key. Furthermore, the brief itself later lists as an evaluation priority: *"Safe handling of text that comes from customers, and keeping secrets out of the browser."*
+- **Resolution:** We rejected the client-side call and routed all re-triage requests through `POST /api/tickets/:id/retriage`, reading `process.env.TRIAGE_API_KEY` exclusively on the server.
+
+### 16.2 Blind HTML Injection via `dangerouslySetInnerHTML`
+- **The Suggestion in the Brief:** "Show the body exactly as the customer wrote it, including any HTML formatting they used."
+- **How Identified:** Ticket `T-2002` contains `<img src=x onerror="alert('hacked')">`. Directly passing customer body strings into `dangerouslySetInnerHTML` causes immediate stored XSS execution in the browser.
+- **Resolution:** Configured `isomorphic-dompurify` to allow only safe layout and semantic typography tags (`b`, `i`, `em`, `strong`, `code`, `a` with `rel="noopener noreferrer"`), while stripping script tags, executable event listeners, and dangerous protocol handlers.
+
+---
+
+## 17. Comprehensive Handling Registry for Provided Test Tickets
+
+| Ticket ID | Customer & Plan | Identified Anomaly & Threat | Resolution & Verification |
+| :--- | :--- | :--- | :--- |
+| `T-2001` | C-12 (enterprise) | Duplicate ticket in seed JSON | In-memory store deduplicates by `external_id` during ingestion set initialization. |
+| `T-2002` | C-33 (pro) | Stored XSS payload in subject and body (`<img src=x onerror="...">`) | Sanitizer strips `onerror` and `img`, preserves safe `<b>` and `<a href>` formatting. Subject is text-escaped. |
+| `T-2003` | C-40 (free) | Prompt injection text in body; `javascript:alert(document.cookie)` attachment link | URL protocol validator neutralizes `javascript:` URI and renders a blocked warning chip. Untrusted body is rendered as text. |
+| `T-2004` | C-58 (platinum) | Non-standard plan `platinum`, invalid priority `P5`, null summary | Review queue validates priority input, requiring agent to select valid P0-P3 before saving. UI gracefully handles null summary. |
+| `T-2005` | C-61 (pro) | 113-character unbroken string subject | CSS `break-words`, `break-all`, and `truncate` prevent horizontal layout blowout on 375px mobile viewports. |
+| `T-2006` | C-91 (pro) | Empty subject `""` and null body | UI supplies fallback indicators: `(No subject)` and `(No message body provided)`. |
+| `T-2007` | C-12 (enterprise) | RTL Arabic text, non-ISO timestamp `"YYYY-MM-DD HH:MM:SS"`, enterprise priority upgrade | Container has `dir="auto"`; tolerant date parser handles SQL timestamp; shows original AI priority `P3` vs enforced `P1`. |
+| `T-2008` | C-70 (free) | Future creation timestamp (`2027-01-01T00:00:00Z`) | Countdown logic detects future `created_at` and displays "Starts in Xd" instead of negative or NaN values. |
+| `T-2009` | C-77 (pro) | Timestamp with timezone offset `+05:30`; invalid agent `agent-99` | Tolerant date parser extracts UTC timestamp; agent display falls back cleanly; API rejects new assignments to `agent-99`. |
+| `T-2010` | C-15 (pro) | Ticket with status `closed` and valid HTTPS attachment | Opens attachment in new tab with `noopener noreferrer`. Allows transition to `open`. |
+| `T-2011` | C-84 (pro) | XSS payload embedded inside AI summary string | Summaries are escaped before rendering; script execution blocked. |
+| `T-2012` | C-52 (free) | Non-standard triage decision `"maybe"` | Evaluator flags unrecognized decision and isolates ticket in the manual review queue. |
