@@ -158,3 +158,25 @@ Standard HTML tables collapse awkwardly or produce unreadable horizontal scrolli
 
 ### 8.4 Row-Level Memoization
 To prevent every table row from redrawing whenever a single ticket is claimed or modified, `TicketRow` and `MobileTicketCard` are wrapped in `React.memo` with a custom equality function. Only rows whose IDs match the changed ticket re-render.
+
+---
+
+## 9. Ticket Details, Security Sanitization & Optimistic Claiming (`/tickets/[id]`)
+
+### 9.1 Defensive HTML Sanitization
+The requirement demands: "Show the body exactly as the customer wrote it, including any HTML formatting they used."
+Test ticket `T-2002` contains an active XSS vector (`<img src=x onerror="alert('hacked')">`), and `T-2011` injects an XSS attack into the AI summary. We utilize `isomorphic-dompurify` configured to allow semantic formatting (`b`, `i`, `em`, `strong`, `p`, `br`, `ul`, `ol`, `li`, `code`, `pre`, `a`) while unconditionally eliminating executable scripts, iframes, inline event attributes (`onerror`, `onclick`, `onload`), and dangerous protocol schemas.
+
+### 9.2 Malicious Protocol Neutralization
+Test ticket `T-2003` includes `attachment_url: "javascript:alert(document.cookie)"`. Clicking such a link would execute arbitrary code in the agent's browser context. The `validateSafeUrl` utility inspects the protocol against an allowlist (`http:`, `https:`). If an unapproved protocol or script scheme is detected, the anchor tag is completely disabled and replaced with a prominent warning badge ("Blocked unsafe attachment link: executable protocol detected").
+
+### 9.3 Optimistic Claiming and Rollback
+When an agent clicks "Claim ticket", the UI immediately reflects the assignment and advances the status from `open` to `in_progress`, while optimistically incrementing the `My tickets` counter in the header. The network request is dispatched concurrently to `POST /api/tickets/:id/claim`.
+- If the server accepts the claim, the authoritative ticket object replaces the optimistic state.
+- If the server responds with HTTP 409 (another agent claimed it first) or HTTP 500, the UI immediately reverts the ticket back to its prior assignment and status, decrements the header counter, and displays an explicit descriptive alert banner informing the agent of the conflict.
+
+### 9.4 In-Flight Debounce on Status Transitions
+To satisfy the rule "Pressing a button twice quickly must not send two requests", status buttons maintain an `isUpdatingStatus` in-flight boolean guard. Subsequent clicks while a mutation is pending are blocked and visually indicate an active spinner.
+
+### 9.5 Secret Management on AI Re-triage
+The brief suggested calling the AI service directly from the browser using `NEXT_PUBLIC_TRIAGE_API_KEY`. As detailed in Section 1.2, this leaks the secret key to client network inspectors and bundle analyzers. The application instead routes all AI re-triage requests through `POST /api/tickets/:id/retriage`, which accesses `process.env.TRIAGE_API_KEY` exclusively in server memory.
