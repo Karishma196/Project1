@@ -257,3 +257,23 @@ A high-resolution visual screenshot of the mobile Lighthouse audit is generated 
 2. **Debounced Search Input (300ms):** Typing queries does not trigger immediate network roundtrips. Search requests execute 300ms after the agent ceases typing.
 3. **Targeted React.memo Comparator:** `TicketRow` and `MobileTicketCard` use custom equality predicates comparing only the item's individual attributes. When a ticket is claimed or resolved, only that single row re-renders; sibling rows remain untouched.
 4. **Zero Heavyweight Libraries:** We deliberately avoided large third-party dashboard suites, animation engines, or heavyweight component libraries, preserving minimal client bundle sizes.
+
+---
+
+## 14. Automated Test Suite & Determinism Strategy
+
+### 14.1 Test Suite Structure
+The automated test suite comprises 56 deterministic tests organized into 9 test suites:
+1. `src/lib/server/rules.test.ts` (14 tests): Validates the state machine transitions (`open -> in_progress -> resolved`, `resolved -> open/closed`, `closed -> open`), Enterprise minimum P1 rule, agent existence validation, and written reason character count requirements.
+2. `src/lib/dateUtils.test.ts` (8 tests): Tests non-ISO date parsing (`T-2007`), timezone offset handling (`T-2009`), future creation dates (`T-2008`), and SLA threshold calculations (Late, At Risk, On Track).
+3. `src/lib/sanitize.test.ts` (8 tests): Verifies neutralization of stored XSS scripts and `onerror` vectors (`T-2002`, `T-2011`), and blocks dangerous protocol execution (`javascript:` in `T-2003`, `data:`, `vbscript:`).
+4. `src/store/slices.test.ts` (7 tests): Tests Redux slices for agent selection, header metrics, filter state manipulation, and live updates buffering.
+5. `src/lib/server/ticketStore.test.ts` (9 tests): Validates in-memory storage of 5,000+ tickets, deduplication of duplicate seed ticket `T-2001`, claim conflict detection, and delta update logging.
+6. `src/components/BulkActionBar.test.tsx` (3 tests): Tests bulk actions with partial failure simulation (keeping successes, retaining failures, reporting granular outcomes).
+7. `src/components/TicketRow.test.tsx` (1 test): Verifies component memoization preventing redraw of sibling rows.
+8. `src/app/api/tickets/route.test.ts` (3 tests): End-to-end integration tests for Next.js Route Handlers verifying filtering, 409 conflict responses, and enterprise priority protection.
+9. `src/lib/utils.test.ts` (3 tests): Tests class name merging and Tailwind conflict resolution.
+
+### 14.2 Determinism Guarantee
+The brief emphasizes: "Tests must not depend on the fake API's random delays or errors."
+All random latencies and simulated 500/409 chaos errors are conditionally bypassed when `NODE_ENV === 'test'` or when the `x-bypass-chaos: 1` request header is supplied, ensuring 100% deterministic, zero-flakiness test execution.
