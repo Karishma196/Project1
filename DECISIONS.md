@@ -116,3 +116,21 @@ Every mutation is written to an in-memory `updateLog` ring buffer (capped at 1,0
 
 ### 6.4 Chaos Simulation and Deterministic Test Bypass
 The API simulates real-world network latency (300ms to 1500ms) and transient errors (10% 500 error rate, 25% 409 claim conflict rate). To ensure automated tests never fail spuriously due to random chaos, the simulation is automatically bypassed when `NODE_ENV === 'test'`, `DISABLE_CHAOS === 'true'`, or when the `x-bypass-chaos: 1` request header is present.
+
+---
+
+## 7. Shared App Data & Header Metrics Architecture (Redux Toolkit)
+
+### 7.1 Agent Switching & Local Storage Persistence
+Rather than implementing mock JWT authentication, the application supports switching between three predefined agents (Priya `agent-1`, Rahul `agent-2`, Meera `agent-3`). Redux manages `selectedAgentId` so all child components can immediately react to agent changes. The selection is mirrored into `localStorage` (`support_agent_id`) on change and rehydrated upon component mounting.
+
+### 7.2 Header Counters: "My tickets (N)" and "To review (N)"
+The brief requires that both counters remain correct:
+1. After an action works (e.g., claiming a ticket increments `My tickets`).
+2. After an action fails (e.g., failed claim rolls back count).
+3. After switching agents (triggers an immediate re-fetch for the new agent ID).
+4. During live updates (background delta stream updates counts).
+To achieve this, Redux provides both instantaneous optimistic mutation actions (`incrementMyTickets`, `decrementMyTickets`, `decrementToReview`) and an asynchronous thunk `fetchMetrics(agentId)` that queries `/api/tickets/metrics?agent_id=...` to ensure server-verified accuracy.
+
+### 7.3 Store Provider Architecture in Next.js App Router
+Per Next.js App Router guidelines, creating a Redux store at module scope risks leaking state between different client sessions during server rendering. `StoreProvider.tsx` utilizes `useRef` to instantiate a single store instance per client render cycle, ensuring clean client-side isolation.
