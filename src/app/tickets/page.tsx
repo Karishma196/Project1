@@ -60,7 +60,7 @@ function TicketsContent() {
 
       const params = new URLSearchParams(searchParams.toString());
       params.set("page", pageToFetch.toString());
-      params.set("limit", "50");
+      params.set("limit", "25");
 
       try {
         const res = await fetch(`/api/tickets?${params.toString()}`);

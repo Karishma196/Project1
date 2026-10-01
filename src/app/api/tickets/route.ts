@@ -12,7 +12,7 @@ export async function GET(req: NextRequest) {
 
   const { searchParams } = new URL(req.url);
   const page = parseInt(searchParams.get("page") || "1", 10);
-  const limit = parseInt(searchParams.get("limit") || "50", 10);
+  const limit = parseInt(searchParams.get("limit") || "25", 10);
 
   const filters = {
     status: searchParams.get("status") || undefined,
